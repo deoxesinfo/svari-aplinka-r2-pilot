@@ -1,0 +1,99 @@
+name: Activate ŠA production admin photo uploads (AUTHORIZED)
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/activate-main-photo-uploads.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: sa-r2-live-worker-deploy
+  cancel-in-progress: false
+jobs:
+  enable-after-pwa:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Verify exact production PWA release and Worker R2 storage before enabling
+        shell: bash
+        env:
+          RAW_CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          RAW_CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          node <<'JS'
+          async function main(){
+            const raw=(process.env.RAW_CF_TOKEN||"").trim();
+            const token=/^[A-Za-z0-9_-]{25,200}$/.test(raw)?raw:/Bearer\s+([A-Za-z0-9_-]{25,200})/i.exec(raw)?.[1];
+            if(!token)throw Error("Missing Cloudflare token");
+            let account=(process.env.RAW_CF_ACCOUNT_ID||"").trim();
+            const cloud=async(path)=>{
+              const r=await fetch("https://api.cloudflare.com/client/v4"+path,{headers:{authorization:"Bearer "+token}});
+              const j=await r.json();if(!r.ok||j.success!==true)throw Error("Cloudflare preflight failed: "+r.status);
+              return j.result;
+            };
+            if(!account){const accts=await cloud("/accounts?per_page=25");if(accts.length!==1)throw Error("Ambiguous account");account=accts[0].id}
+            if(!/^[a-f0-9]{32}$/i.test(account))throw Error("Invalid CF account ID");
+            const settings=await cloud("/accounts/"+account+"/workers/scripts/svari-aplinka-photos/settings");
+            const b=(name)=>(settings.bindings||[]).find(x=>x.name===name);
+            if(b("ENABLE_UPLOADS")?.text!=="false"||b("PILOT_ENABLED")?.text!=="false")throw Error("Unexpected gates");
+            if(b("R2_BUCKET")?.jurisdiction!=="eu"||b("R2_BUCKET")?.bucket_name!=="svari-aplinka-foto")throw Error("Invalid EU bucket binding");
+            const r=await fetch("https://svari-aplinka-photos.svariaplinka-lt.workers.dev/health",{cache:"no-store"});
+            const h=await r.json();
+            if(r.status!==200||h.status!=="ok"||h.storage!=="ready")throw Error("Private R2 not accessible");
+            // Github main must still be our pinned R2 PWA release.
+            const g=await fetch("https://api.github.com/repos/deoxesinfo/svari-aplinka-pwa/commits/main",{headers:{"User-Agent":"sa-photo-release-check"}});
+            const git=await g.json();
+            if(!g.ok||git.sha!=="a91de49cd1fb49a9884c2a0f96c7c1ffdfc41724")throw Error("PWA main release SHA changed");
+            const pages=await fetch("https://deoxesinfo.github.io/svari-aplinka-pwa/",{cache:"no-store"});
+            if(pages.status!==200)throw Error("Production PWA currently unavailable");
+            const html=await pages.text();
+            if(!html.includes("Švari Aplinka"))throw Error("Production PWA HTML mismatch");
+            require("fs").appendFileSync(process.env.GITHUB_ENV,"CLOUDFLARE_API_TOKEN="+token+"\nCLOUDFLARE_ACCOUNT_ID="+account+"\n",{mode:0o600});
+            console.log("PREFLIGHT PASS: private EU R2 accessible, production PWA reachable, both gates disabled");
+          }
+          main().catch(e=>{console.log("ABORT:",String(e.message||e).slice(0,200));process.exitCode=1});
+          JS
+      - name: Checkout pinned production photo Worker
+        uses: actions/checkout@v4
+        with:
+          repository: deoxesinfo/svari-aplinka-pwa
+          ref: a91de49cd1fb49a9884c2a0f96c7c1ffdfc41724
+          persist-credentials: false
+      - name: Enable secure admin uploads via Wrangler (retain all Cloudflare vars)
+        run: |
+          cat > wrangler.toml <<'TOML'
+          name = "svari-aplinka-photos"
+          main = "cloudflare/photo-worker.mjs"
+          compatibility_date = "2026-10-19"
+          workers_dev = true
+          keep_vars = true
+          [[r2_buckets]]
+          binding = "R2_BUCKET"
+          bucket_name = "svari-aplinka-foto"
+          jurisdiction = "eu"
+          [vars]
+          ENABLE_UPLOADS = "true"
+          PILOT_ENABLED = "false"
+          TOML
+          npx --yes wrangler@4 deploy --config wrangler.toml --keep-vars
+      - name: Verify production Cloudflare photo API (NO actual upload)
+        run: |
+          node <<'JS'
+          (async()=>{
+            const api="https://svari-aplinka-photos.svariaplinka-lt.workers.dev";
+            for(let i=0;i<12;i++){
+              const health=await fetch(api+"/health",{cache:"no-store"});
+              const h=await health.json().catch(()=>({}));
+              if(health.status===200&&h.status==="ok"&&h.storage==="ready"){
+                const r=await fetch(api+"/v1/photos",{method:"POST",headers:{"x-organization-id":"ef6edcc2-1c7d-4dd1-8ef2-67c2b5a89bff"}});
+                const j=await r.json().catch(()=>({}));
+                if(r.status===401&&j.error==="AUTH_REQUIRED"){
+                  console.log("PASS: Worker enabled, EU storage ready, unauthorized photo uploads denied.");
+                  return;
+                }
+              }
+              await new Promise(resolve=>setTimeout(resolve,2500));
+            }
+            throw Error("Worker did not confirm secure active upload gate");
+          })().catch(e=>{console.log("ACTIVATION_CHECK_FAILED",e.message);process.exitCode=1});
+          JS
