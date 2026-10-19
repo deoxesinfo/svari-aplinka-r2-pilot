@@ -56,6 +56,7 @@ jobs:
             if(settings.ok){
               const binds=settings.result?.bindings||[];
               console.log("WORKER_BINDINGS",JSON.stringify(binds.map(b=>({name:b.name,type:b.type,
+                bucket_name:b.type==="r2_bucket"?b.bucket_name:undefined,
                 state: b.name==="ENABLE_UPLOADS"||b.name==="PILOT_ENABLED"?
                   (b.text==="true"?"ON":b.text==="false"?"OFF":"unknown"):undefined}))));
               // Never output any other binding's text or secrets.
@@ -66,7 +67,12 @@ jobs:
             const settings2=await api("/accounts/"+account+"/workers/scripts/"+script+"/script-settings");
             console.log("WORKER_OBSERVABILITY",JSON.stringify({ok:settings2.ok,status:settings2.status,
              enabled:settings2.result?.observability?.enabled===true,errors:settings2.errors}));
-            const objects=await api("/accounts/"+account+"/r2/buckets/svari-aplinka-foto/objects?prefix=__sa_pilot_guard__%2F");
+            const buckets=await api("/accounts/"+account+"/r2/buckets");
+            const list=Array.isArray(buckets.result?.buckets)?buckets.result.buckets:(Array.isArray(buckets.result)?buckets.result:[]);
+            console.log("R2_BUCKETS",JSON.stringify({ok:buckets.ok,status:buckets.status,names:list.map(b=>b.name),errors:buckets.errors}));
+            const boundBucket=(settings.result?.bindings||[]).find(b=>b.name==="R2_BUCKET"&&b.type==="r2_bucket")?.bucket_name;
+            const name=encodeURIComponent(boundBucket||"svari-aplinka-foto");
+            const objects=await api("/accounts/"+account+"/r2/buckets/"+name+"/objects?prefix=__sa_pilot_guard__%2F");
             console.log("R2_PILOT_GUARD",JSON.stringify({ok:objects.ok,status:objects.status,
              claimExists:objects.ok&&Array.isArray(objects.result?.objects)&&objects.result.objects.some(o=>o.key==="__sa_pilot_guard__/one-photo-v1"),
              objectCount:objects.ok?(objects.result?.objects||[]).length:undefined,errors:objects.errors}));
