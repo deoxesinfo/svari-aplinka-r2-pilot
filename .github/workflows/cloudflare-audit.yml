@@ -28,10 +28,10 @@ jobs:
             const token=plain||fromBearer||quoted;
             if(!token){console.log("TOKEN_FORMAT_INVALID: unexpected GitHub secret format; cannot safely extract a Cloudflare token");process.exitCode=2;return}
             console.log("TOKEN_FORMAT",plain?"raw_token":fromBearer?"bearer_header":"quoted_token");
-            async function api(path){
-              const r=await fetch("https://api.cloudflare.com/client/v4"+path,{
-                headers:{"Authorization":"Bearer "+token,"Accept":"application/json"}
-              });
+            async function api(path,jurisdiction){
+              const headers={"Authorization":"Bearer "+token,"Accept":"application/json"};
+              if(jurisdiction)headers["cf-r2-jurisdiction"]=jurisdiction;
+              const r=await fetch("https://api.cloudflare.com/client/v4"+path,{headers});
               const text=await r.text();
               let json={};try{json=JSON.parse(text)}catch{}
               const errors=(json.errors||[]).map(e=>({code:e.code,message:String(e.message||"").slice(0,140)}));
@@ -67,15 +67,16 @@ jobs:
             const settings2=await api("/accounts/"+account+"/workers/scripts/"+script+"/script-settings");
             console.log("WORKER_OBSERVABILITY",JSON.stringify({ok:settings2.ok,status:settings2.status,
              enabled:settings2.result?.observability?.enabled===true,errors:settings2.errors}));
-            const buckets=await api("/accounts/"+account+"/r2/buckets");
+            const buckets=await api("/accounts/"+account+"/r2/buckets","eu");
             const list=Array.isArray(buckets.result?.buckets)?buckets.result.buckets:(Array.isArray(buckets.result)?buckets.result:[]);
-            console.log("R2_BUCKETS",JSON.stringify({ok:buckets.ok,status:buckets.status,names:list.map(b=>b.name),errors:buckets.errors}));
+            console.log("R2_BUCKETS_EU",JSON.stringify({ok:buckets.ok,status:buckets.status,names:list.map(b=>b.name),errors:buckets.errors}));
             const boundBucket=(settings.result?.bindings||[]).find(b=>b.name==="R2_BUCKET"&&b.type==="r2_bucket")?.bucket_name;
             const name=encodeURIComponent(boundBucket||"svari-aplinka-foto");
-            const objects=await api("/accounts/"+account+"/r2/buckets/"+name+"/objects?prefix=__sa_pilot_guard__%2F");
+            const objects=await api("/accounts/"+account+"/r2/buckets/"+name+"/objects?prefix=__sa_pilot_guard__%2F","eu");
+            const keys=Array.isArray(objects.result)?objects.result:(objects.result?.objects||[]);
             console.log("R2_PILOT_GUARD",JSON.stringify({ok:objects.ok,status:objects.status,
-             claimExists:objects.ok&&Array.isArray(objects.result?.objects)&&objects.result.objects.some(o=>o.key==="__sa_pilot_guard__/one-photo-v1"),
-             objectCount:objects.ok?(objects.result?.objects||[]).length:undefined,errors:objects.errors}));
+             claimExists:objects.ok&&keys.some(o=>o.key==="__sa_pilot_guard__/one-photo-v1"),
+             objectCount:objects.ok?keys.length:undefined,errors:objects.errors}));
             if(!settings.ok||!objects.ok)process.exitCode=6;
           }
           run().catch(()=>{console.log("AUDIT_FAILED: check token secret format or Cloudflare connectivity (no secrets logged)");process.exitCode=7});
