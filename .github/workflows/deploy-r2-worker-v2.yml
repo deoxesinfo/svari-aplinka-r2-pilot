@@ -68,7 +68,7 @@ jobs:
           bucket_name = "svari-aplinka-foto"
           jurisdiction = "eu"
           TOML
-          npx --yes wrangler@4 deploy --config wrangler.toml --keep-vars --yes
+          npx --yes wrangler@4 deploy --config wrangler.toml --keep-vars
       - name: Verify real private EU R2 binding and uploads still disabled
         run: |
           node <<'JS'
