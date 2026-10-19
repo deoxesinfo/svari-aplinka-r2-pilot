@@ -17,7 +17,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: deoxesinfo/svari-aplinka-pwa
-          ref: bf6cd12d5ae08bf8083b5ff31c10f9d0bf997110
+          ref: b2a2a3e1ff26f0b434d634455664ed9918a316ef
           persist-credentials: false
       - uses: actions/setup-node@v4
         with: {node-version: "22"}
@@ -101,6 +101,6 @@ jobs:
             const j=await res.json();
             const data=j?.supabaseNetworkProbe||[];
             console.log("SAFE_SUPABASE_EGRESS_PROBE",JSON.stringify(data));
-            if(res.status!==200||data.length!==2)throw Error("Expected both network read-only probes");
+            if(res.status!==200||data.length!==3)throw Error("Expected both network read-only probes");
           })().catch(e=>{console.log("PROBE_ERROR:",e.message);process.exitCode=1});
           JS
