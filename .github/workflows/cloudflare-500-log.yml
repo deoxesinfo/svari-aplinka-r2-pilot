@@ -68,7 +68,7 @@ jobs:
                 const detail=String(meta.message||"");
                 const responseCode=Number(meta.statusCode||0);
                 if(meta.level==="error"||responseCode>=400)
-                   console.log("ERROR_EVENT",JSON.stringify({at:new Date(item.timestamp).toISOString(),responseCode,workerError,stage,sourceKeys:Object.keys(item?.source||{}),messageKind: detail.startsWith("R2_")?detail.slice(0,48):"other"}));
+                   console.log("ERROR_EVENT",JSON.stringify({at:new Date(item.timestamp).toISOString(),responseCode,workerError,stage,sourceKeys:Object.keys(item?.source||{}),sourceMessageType:typeof item?.source?.message,sourceMessagePreview:String(item?.source?.message||"").replace(/[0-9a-f]{8}-[0-9a-f-]{27,40}/gi,"[uuid]").replace(/Bearer\\s+\\S+/gi,"Bearer [redacted]").slice(0,150),messageKind: detail.startsWith("R2_")?detail.slice(0,48):"other"}));
               }
             }
           }
