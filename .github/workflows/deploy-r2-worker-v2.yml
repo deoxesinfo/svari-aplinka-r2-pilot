@@ -1,0 +1,91 @@
+name: Deploy ŠA photo Worker v2 (AUTHORIZED, uploads remain OFF)
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/deploy-r2-worker-v2.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: sa-r2-live-worker-deploy
+  cancel-in-progress: false
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Checkout reviewed photos API source only
+        uses: actions/checkout@v4
+        with:
+          repository: deoxesinfo/svari-aplinka-pwa
+          ref: a0adc5e72b8032ac1104a0f08b292ee1294bfb95
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - name: Run Worker and UI tests
+        run: |
+          npm ci --legacy-peer-deps --no-audit --no-fund
+          npm test
+          node --test cloudflare/photo-worker.test.mjs
+      - name: Prepare account scope and enforce disabled gates
+        env:
+          CF_RAW: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT_ID_RAW: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          node <<'JS'
+          async function main(){
+            const raw=(process.env.CF_RAW||"").trim();
+            const token=/^[A-Za-z0-9_-]{25,200}$/.test(raw)?raw:/Bearer\s+([A-Za-z0-9_-]{25,200})/i.exec(raw)?.[1];
+            if(!token)throw Error("Cloudflare token missing");
+            const call=async(path)=>{
+              const r=await fetch("https://api.cloudflare.com/client/v4"+path,{headers:{authorization:"Bearer "+token}});
+              const j=await r.json();if(!r.ok||j.success!==true)throw Error("Cloudflare read failure "+r.status);
+              return j.result;
+            };
+            let acc=(process.env.CF_ACCOUNT_ID_RAW||"").trim();
+            if(!acc){const a=await call("/accounts?per_page=25");if(a.length!==1)throw Error("Cloudflare account selection ambiguous");acc=a[0].id}
+            if(!/^[a-f0-9]{32}$/i.test(acc))throw Error("Invalid account id");
+            const binds=(await call("/accounts/"+acc+"/workers/scripts/svari-aplinka-photos/settings")).bindings;
+            const find=(n)=>binds.find(b=>b.name===n);
+            if(find("ENABLE_UPLOADS")?.text!=="false"||find("PILOT_ENABLED")?.text!=="false")throw Error("Uploads are not safely off");
+            if(find("R2_BUCKET")?.jurisdiction!=="eu"||find("R2_BUCKET")?.bucket_name!=="svari-aplinka-foto")throw Error("EU binding missing");
+            if(!find("SUPABASE_URL")||!find("SUPABASE_PUBLISHABLE_KEY")||!find("ALLOWED_ORIGIN"))throw Error("Required Supabase settings missing");
+            require("fs").appendFileSync(process.env.GITHUB_ENV, "CLOUDFLARE_API_TOKEN="+token+"\nCLOUDFLARE_ACCOUNT_ID="+acc+"\n",{mode:0o600});
+            console.log("PREFLIGHT_OK: upload gates false, R2 eu, production bindings preserved");
+          }
+          main().catch(e=>{console.log(String(e.message));process.exitCode=1});
+          JS
+      - name: Deploy code with EU R2 binding and unchanged dashboard variables
+        run: |
+          cat > wrangler.toml <<'TOML'
+          name = "svari-aplinka-photos"
+          main = "cloudflare/photo-worker.mjs"
+          compatibility_date = "2026-10-19"
+          workers_dev = true
+          keep_vars = true
+          [[r2_buckets]]
+          binding = "R2_BUCKET"
+          bucket_name = "svari-aplinka-foto"
+          jurisdiction = "eu"
+          TOML
+          npx --yes wrangler@4 deploy --config wrangler.toml --keep-vars --yes
+      - name: Verify real private EU R2 binding and uploads still disabled
+        run: |
+          node <<'JS'
+          (async()=>{
+            const host="https://svari-aplinka-photos.svariaplinka-lt.workers.dev";
+            for(let i=0;i<10;i++){
+              const r=await fetch(host+"/health",{cache:"no-store"});
+              const x=await r.json().catch(()=>({}));
+              if(r.status===200&&x.status==="ok"&&x.storage==="ready"){
+                const p=await fetch(host+"/v1/photos",{method:"POST",headers:{"x-organization-id":"ef6edcc2-1c7d-4dd1-8ef2-67c2b5a89bff"}});
+                const d=await p.json().catch(()=>({}));
+                if(p.status!==503||d.error!=="UPLOADS_DISABLED")throw Error("Upload gate not disabled");
+                console.log("PASS: REAL EU R2 /health, uploads closed");
+                return;
+              }
+              await new Promise(resolve=>setTimeout(resolve,2500));
+            }
+            throw Error("EU Worker /health not ready after deployment");
+          })().catch(e=>{console.log(e.message);process.exitCode=1});
+          JS
