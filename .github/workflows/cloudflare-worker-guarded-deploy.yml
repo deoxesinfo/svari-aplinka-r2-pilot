@@ -1,0 +1,116 @@
+name: Cloudflare Worker guarded deploy (photos remain DISABLED)
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/cloudflare-worker-guarded-deploy.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: sa-cloudflare-worker-deploy
+  cancel-in-progress: false
+jobs:
+  deploy-guarded:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout reviewed Worker source, pinned commit
+        uses: actions/checkout@v4
+        with:
+          repository: deoxesinfo/svari-aplinka-pwa
+          ref: 604324153c2942bf3f7569259e2c7bcf4a75a204
+          persist-credentials: false
+      - name: Local Worker security tests
+        run: node --test cloudflare/photo-worker.test.mjs
+      - name: Deploy exactly one disabled Worker via Cloudflare API, verify and roll back if unhealthy
+        env:
+          CF_TOKEN_RAW: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          node <<'JS'
+          const fs=require("node:fs");
+          const raw=(process.env.CF_TOKEN_RAW||"").trim();
+          const token=/^[A-Za-z0-9_-]{25,200}$/.test(raw)?raw:(/Bearer\s+([A-Za-z0-9_-]{25,200})/i.exec(raw)?.[1]);
+          if(!token){console.log("TOKEN_MISSING");process.exit(2)}
+          const apiBase="https://api.cloudflare.com/client/v4";
+          async function cf(path,method="GET",payload=null){
+            const headers={authorization:"Bearer "+token};
+            if(payload&&!(payload instanceof FormData))headers["content-type"]="application/json";
+            const r=await fetch(apiBase+path,{method,headers,body:payload instanceof FormData?payload:payload?JSON.stringify(payload):undefined});
+            const json=await r.json().catch(()=>({}));
+            return {ok:r.ok&&json.success===true,status:r.status,result:json.result,errors:(json.errors||[]).map(e=>({code:e.code}))};
+          }
+          async function probe(){
+            const url="https://svari-aplinka-photos.svariaplinka-lt.workers.dev";
+            const health=await fetch(url+"/health",{cache:"no-store"}).catch(()=>null);
+            const goodHealth=health?.status===200&&(await health.json().catch(()=>null))?.status==="ok";
+            const upload=await fetch(url+"/v1/photos",{method:"POST",
+              headers:{"Origin":"https://deoxesinfo.github.io","x-organization-id":"00000000-0000-4000-8000-000000000001"},
+              body:"",cache:"no-store"}).catch(()=>null);
+            return {goodHealth,uploadDisabled:upload?.status===503};
+          }
+          async function main(){
+            let account=(process.env.CF_ACCOUNT_ID||"").trim();
+            if(!account){
+              const a=await cf("/accounts?per_page=50");
+              if(!a.ok||!Array.isArray(a.result)||a.result.length!==1)throw Error("ACCOUNT_UNAVAILABLE");
+              account=a.result[0].id;
+            }
+            if(!/^[0-9a-f]{32}$/i.test(account))throw Error("INVALID_ACCOUNT");
+            const script="svari-aplinka-photos";
+            const base="/accounts/"+account+"/workers/scripts/"+script;
+            const settings=await cf(base+"/settings");
+            if(!settings.ok)throw Error("SETTINGS_READ_FAILED_"+settings.status);
+            const bindings=settings.result?.bindings||[];
+            const found=(n)=>bindings.find(x=>x.name===n);
+            if(found("ENABLE_UPLOADS")?.text!=="false"||found("PILOT_ENABLED")?.text!=="false")throw Error("UPLOAD_SWITCHES_MUST_BE_DISABLED");
+            const bucket=found("R2_BUCKET");
+            if(bucket?.type!=="r2_bucket"||bucket.bucket_name!=="svari-aplinka-foto"||bucket.jurisdiction!=="eu")throw Error("R2_BINDING_MISMATCH");
+            const required=["ALLOWED_ORIGIN","ENABLE_UPLOADS","PILOT_ENABLED","PILOT_JOB_ID","PILOT_ORG_ID","PILOT_USER_ID","R2_BUCKET","SUPABASE_PUBLISHABLE_KEY","SUPABASE_URL"];
+            if(bindings.length!==required.length||required.some(n=>!found(n)))throw Error("UNEXPECTED_WORKER_BINDINGS");
+            const before=await probe();
+            console.log("PRE_DEPLOY",JSON.stringify(before));
+            if(!before.goodHealth||!before.uploadDisabled)throw Error("WORKER_NOT_HEALTHY_OR_NOT_DISABLED");
+            const deployments=await cf(base+"/deployments");
+            const previous=deployments.result?.deployments?.[0]?.versions;
+            if(!deployments.ok||!Array.isArray(previous)||!previous.length)throw Error("ROLLBACK_VERSION_UNAVAILABLE");
+            const source=fs.readFileSync("cloudflare/photo-worker.mjs","utf8");
+            if(!source.includes('stage="R2_RESERVATION"')||!source.includes('fail(502,"UPLOAD_"+stage+"_FAILED")'))throw Error("SOURCE_NOT_REVIEWED");
+            const metadata={
+              main_module:"photo-worker.mjs",
+              bindings,
+              compatibility_date:(settings.result.compatibility_date||"2026-10-19").slice(0,10),
+              compatibility_flags:settings.result.compatibility_flags||[],
+              annotations:{"workers/message":"R2 safe stage diagnostics; uploads disabled, GitHub reviewed commit 6043241"}
+            };
+            const multipart=new FormData();
+            multipart.set("metadata",new Blob([JSON.stringify(metadata)],{type:"application/json"}),"metadata.json");
+            multipart.set("photo-worker.mjs",new Blob([source],{type:"application/javascript+module"}),"photo-worker.mjs");
+            const deploy=await cf(base,"PUT",multipart);
+            console.log("DEPLOY_STATUS",JSON.stringify({success:deploy.ok,status:deploy.status,errors:deploy.errors}));
+            if(!deploy.ok)throw Error("DEPLOY_REJECTED");
+            for(let i=0;i<8;i++){
+              await new Promise(r=>setTimeout(r,3000));
+              const checked=await probe();
+              if(checked.goodHealth&&checked.uploadDisabled){
+                console.log("DEPLOY_VERIFIED",JSON.stringify(checked));
+                const now=await cf(base+"/settings");
+                const nowVars=now.result?.bindings||[];
+                if(!now.ok||nowVars.find(x=>x.name==="ENABLE_UPLOADS")?.text!=="false"||
+                     nowVars.find(x=>x.name==="PILOT_ENABLED")?.text!=="false"||
+                     nowVars.find(x=>x.name==="R2_BUCKET")?.jurisdiction!=="eu"){
+                  console.log("POST_DEPLOY_SETTING_MISMATCH");
+                  break;
+                }
+                console.log("WORKER_CONFIG_VERIFIED: BOTH OFF AND EU R2 INTACT");
+                return;
+              }
+            }
+            console.log("ROLLBACK_START: deployment validation failed");
+            const rb=await cf(base+"/deployments","POST",{
+              strategy:"percentage",versions:previous.map(v=>({version_id:v.version_id,percentage:v.percentage}))
+            });
+            console.log("ROLLBACK_RESULT",JSON.stringify({success:rb.ok,status:rb.status,errors:rb.errors}));
+            throw Error("DEPLOY_VERIFICATION_FAILED");
+          }
+          main().catch(e=>{console.log("DEPLOY_ABORTED",String(e?.message||"unknown").slice(0,120));process.exitCode=1});
+          JS
