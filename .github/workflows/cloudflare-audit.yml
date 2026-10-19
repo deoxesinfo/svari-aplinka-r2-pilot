@@ -19,8 +19,9 @@ jobs:
           set -euo pipefail
           node <<'JS'
           async function run(){
-            const token=process.env.CF_TOKEN;
+            const token=(process.env.CF_TOKEN||"").trim();
             if(!token){console.log("TOKEN_MISSING: add CLOUDFLARE_API_TOKEN to repository secrets"); process.exitCode=2;return}
+            if(!/^[A-Za-z0-9_-]{25,200}$/.test(token)){console.log("TOKEN_FORMAT_INVALID: GitHub secret must contain ONLY the token value, not a curl command, Bearer prefix or quotation marks");process.exitCode=2;return}
             async function api(path){
               const r=await fetch("https://api.cloudflare.com/client/v4"+path,{
                 headers:{"Authorization":"Bearer "+token,"Accept":"application/json"}
@@ -65,5 +66,5 @@ jobs:
              objectCount:objects.ok?(objects.result?.objects||[]).length:undefined,errors:objects.errors}));
             if(!settings.ok||!objects.ok)process.exitCode=6;
           }
-          run().catch(e=>{console.log("AUDIT_FAILED",e instanceof Error?e.message:"unknown");process.exitCode=7});
+          run().catch(()=>{console.log("AUDIT_FAILED: check token secret format or Cloudflare connectivity (no secrets logged)");process.exitCode=7});
           JS
