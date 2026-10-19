@@ -1,0 +1,63 @@
+name: Fix Cloudflare Worker EU R2 binding (APPROVED)
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/fix-eu-r2-binding.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: r2-worker-config
+  cancel-in-progress: false
+jobs:
+  fix-binding:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fix only the missing EU jurisdiction, preserve all other bindings and disabled gates
+        shell: bash
+        env:
+          RAW_CF_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          node <<'JS'
+          const tokenRaw=(process.env.RAW_CF_TOKEN||"").trim();
+          const token=/^[A-Za-z0-9_-]{25,200}$/.test(tokenRaw)?tokenRaw:/Bearer\s+([A-Za-z0-9_-]{25,200})/i.exec(tokenRaw)?.[1];
+          if(!token)throw Error("Cloudflare token unavailable");
+          const api="https://api.cloudflare.com/client/v4";
+          async function call(path,method="GET",body){
+            const headers={authorization:"Bearer "+token};
+            const r=await fetch(api+path,{method,headers,body});
+            const j=await r.json().catch(()=>({}));
+            if(!r.ok||j.success!==true)throw Error("Cloudflare API "+method+" status "+r.status+" at "+path);
+            return j.result;
+          }
+          let acct=(process.env.CF_ACCOUNT_ID||"").trim();
+          if(!acct){const accounts=await call("/accounts?per_page=25");if(accounts.length!==1)throw Error("Exactly one Cloudflare account required");acct=accounts[0].id}
+          if(!/^[a-f0-9]{32}$/i.test(acct))throw Error("Account id invalid");
+          const path="/accounts/"+acct+"/workers/scripts/svari-aplinka-photos/settings";
+          const original=await call(path);
+          const all=original.bindings;
+          if(!Array.isArray(all))throw Error("Existing bindings unavailable, no write");
+          const get=(name)=>all.find(b=>b.name===name);
+          const target=get("R2_BUCKET");
+          if(target?.type!=="r2_bucket"||target.bucket_name!=="svari-aplinka-foto")throw Error("Unexpected R2 binding; refuse write");
+          if(get("ENABLE_UPLOADS")?.text!=="false"||get("PILOT_ENABLED")?.text!=="false")throw Error("Uploads must be disabled before binding change");
+          if(!get("SUPABASE_PUBLISHABLE_KEY")||!get("SUPABASE_URL")||!get("ALLOWED_ORIGIN"))throw Error("Critical bindings missing");
+          if(target.jurisdiction==="eu"){console.log("ALREADY_CORRECT: EU jurisdiction, no API writes");return}
+          const updated=all.map(b=>b.name==="R2_BUCKET"?{...b,jurisdiction:"eu"}:b);
+          const part=new FormData();
+          part.set("settings",JSON.stringify({bindings:updated,annotations:{"workers/message":"R2 jurisdiction EU fix; uploads disabled"}}));
+          const after=await call(path,"PATCH",part);
+          console.log("PATCH_RETURNED",{binding_count:after?.bindings?.length||0});
+          const check=await call(path);
+          const revised=check.bindings||[];
+          const eu=revised.find(b=>b.name==="R2_BUCKET");
+          if(eu?.jurisdiction!=="eu")throw Error("EU patch was not retained");
+          if(revised.length!==all.length)throw Error("Binding count differs, manual investigation needed");
+          for(const name of ["ENABLE_UPLOADS","PILOT_ENABLED"]){
+            if(revised.find(b=>b.name===name)?.text!=="false")throw Error("Upload gate unexpectedly changed");
+          }
+          console.log("PASS: R2 EU binding fixed, "+revised.length+" bindings retained, both upload gates OFF.");
+          JS
