@@ -1,0 +1,65 @@
+# Isolated preview: only deploy on explicit workflow-file changes or manual dispatch.
+# This workflow NEVER writes to the source repo or its GitHub Pages site.
+name: Isolated one-photo PWA pilot (separate GitHub Pages)
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/pages.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: pilot-github-pages
+  cancel-in-progress: true
+jobs:
+  verify-and-deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Fetch ONLY approved R2 DRAFT source, never production main
+        uses: actions/checkout@v4
+        with:
+          repository: deoxesinfo/svari-aplinka-pwa
+          ref: 9222bcefc473ee7e7df7816ef854ea7af0189993
+          persist-credentials: false
+      - name: Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install dependencies
+        run: npm install --legacy-peer-deps --no-audit --no-fund
+      - name: Unit and security tests
+        run: |
+          npm test
+          node --test cloudflare/photo-worker.test.mjs
+      - name: Set standalone login-gated pilot entry (NEVER production app)
+        run: |
+          cp pilot.html index.html
+          printf 'User-agent: *\nDisallow: /\n' > public/robots.txt
+          rm -f public/manifest.webmanifest
+      - name: Compile isolated one-photo page
+        env:
+          VITE_PWA_BASE_PATH: /svari-aplinka-r2-pilot/
+          VITE_SA_R2_PILOT: admin-one-photo
+          VITE_SA_R2_PILOT_JOB_ID: 72f0699e-e446-4379-b93f-c702c4f70c46
+          VITE_SA_R2_PILOT_ORG_ID: ef6edcc2-1c7d-4dd1-8ef2-67c2b5a89bff
+        run: |
+          npm run build
+          grep -q 'Švari Aplinka.*bandomoji nuotrauka' dist/index.html
+          test ! -e dist/manifest.webmanifest
+      - name: Configure Pages in PILOT repository only
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+      - name: Upload PILOT artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+      - name: Deploy PILOT Pages only
+        id: deployment
+        uses: actions/deploy-pages@v4
