@@ -57,6 +57,7 @@ jobs:
               const binds=settings.result?.bindings||[];
               console.log("WORKER_BINDINGS",JSON.stringify(binds.map(b=>({name:b.name,type:b.type,
                 bucket_name:b.type==="r2_bucket"?b.bucket_name:undefined,
+                jurisdiction:b.type==="r2_bucket"?(b.jurisdiction||"MISSING"):undefined,
                 state: b.name==="ENABLE_UPLOADS"||b.name==="PILOT_ENABLED"?
                   (b.text==="true"?"ON":b.text==="false"?"OFF":"unknown"):undefined}))));
               // Never output any other binding's text or secrets.
