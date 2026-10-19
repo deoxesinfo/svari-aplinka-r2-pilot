@@ -53,7 +53,7 @@ jobs:
             console.log("RESULT_SHAPE",Array.isArray(r.result)?"array":Object.keys(r.result||{}));
             console.log("MATCHED_EVENTS",events.length);
             // Never dump raw requests, JWT, query parameters, addresses, or metadata bodies.
-            for(const item of events.slice(0,30)){
+            for(const item of events.slice(0,80)){
               const meta=item?.$metadata||item?.metadata||{};
               const workers=meta?.$workers||meta?.workers||{};
               const status=meta?.statusCode||workers?.event?.response?.status||"unknown";
@@ -66,6 +66,15 @@ jobs:
                 const stage=/\\\"stage\\\"\\s*:\\s*\\\"([A-Z_]+)\\\"/.exec(src)?.[1]||"";
                 const workerError=/R2_UPLOAD_UNEXPECTED|WORKER_EXCEPTION|R2_HEALTH_UNAVAILABLE/.exec(src)?.[0]||"";
                 const detail=String(meta.message||"");
+                const msgText=String(item?.source?.message||"");
+                const safeLabels=["R2_UPLOAD_REQUEST_RESULT","R2_UPLOAD_REJECTED","R2_UPLOAD_UNEXPECTED","R2_WORKER_UNEXPECTED","R2_HEALTH_UNAVAILABLE"];
+                const diag=safeLabels.find(x=>msgText.includes(x))||"";
+                if(diag){
+                  const statusTag=/\\b(?:status|statusCode)[^0-9]{1,8}(400|401|403|404|409|413|415|422|429|500|502|503)\\b/.exec(msgText)?.[1]||"";
+                  const codeTag=/\\b(INTERNAL_ERROR|DATABASE_CHECK_FAILED|NO_MEMBERSHIP|AUTH_INVALID|ADMIN_ONLY|NOT_CONFIGURED|CONFIG_MISMATCH|UPLOAD_[A-Z_]+_FAILED|R2_[A-Z_]+|PHOTO_LIMIT|JOB_UNAVAILABLE|INVALID_ID)\\b/.exec(msgText)?.[1]||"";
+                  const typeTag=/\\b(TypeError|ReferenceError|RangeError|SyntaxError|Error)\\b/.exec(msgText)?.[1]||"";
+                  console.log("DIAGNOSTIC",{at:new Date(item.timestamp).toISOString(),diag,statusTag,codeTag,typeTag});
+                }
                 const responseCode=Number(meta.statusCode||0);
                 if(meta.level==="error"||responseCode>=400)
                    console.log("ERROR_EVENT",JSON.stringify({at:new Date(item.timestamp).toISOString(),responseCode,workerError,stage,sourceKeys:Object.keys(item?.source||{}),sourceMessageType:typeof item?.source?.message,sourceMessagePreview:String(item?.source?.message||"").replace(/[0-9a-f]{8}-[0-9a-f-]{27,40}/gi,"[uuid]").replace(/Bearer\\s+\\S+/gi,"Bearer [redacted]").slice(0,150),messageKind: detail.startsWith("R2_")?detail.slice(0,48):"other"}));
