@@ -1,0 +1,94 @@
+name: ŠA R2 Worker V2.2.9 safe diagnostics deploy
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/deploy-r2-v229.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: sa-r2-live-worker-deploy
+  cancel-in-progress: false
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: deoxesinfo/svari-aplinka-pwa
+          ref: c60b6fa855d707bc0da6cabff57153fa4394f3ae
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with: {node-version: "22"}
+      - name: Verify source code with existing production-compatible test suite
+        run: |
+          npm install --legacy-peer-deps --no-audit --no-fund
+          node --test cloudflare/photo-worker.test.mjs
+      - name: Resolve account and verify current Worker protection
+        env:
+          CF_RAW_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT_ID_RAW: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          node <<'JS'
+          async function main(){
+            const raw=(process.env.CF_RAW_TOKEN||"").trim();
+            const token=/^[A-Za-z0-9_-]{25,200}$/.test(raw)?raw:/Bearer\s+([A-Za-z0-9_-]{25,200})/i.exec(raw)?.[1];
+            if(!token)throw Error("CF token unavailable");
+            const call=async(path)=>{
+              const r=await fetch("https://api.cloudflare.com/client/v4"+path,{headers:{authorization:"Bearer "+token}});
+              const json=await r.json();
+              if(!r.ok||!json.success)throw Error("Cloudflare preflight failure HTTP "+r.status);
+              return json.result;
+            };
+            let account=(process.env.CF_ACCOUNT_ID_RAW||"").trim();
+            if(!account){const a=await call("/accounts?per_page=25");if(a.length!==1)throw Error("Cloudflare account ambiguous");account=a[0].id}
+            if(!/^[0-9a-f]{32}$/i.test(account))throw Error("Invalid account id");
+            const bind=(await call("/accounts/"+account+"/workers/scripts/svari-aplinka-photos/settings")).bindings||[];
+            const find=(n)=>bind.find(x=>x.name===n);
+            if(find("R2_BUCKET")?.bucket_name!=="svari-aplinka-foto"||find("R2_BUCKET")?.jurisdiction!=="eu")throw Error("EU R2 binding unavailable");
+            if(find("PILOT_ENABLED")?.text!=="false"||find("ENABLE_UPLOADS")?.text!=="true")throw Error("Unexpected upload switches, abort update");
+            for(const n of ["ALLOWED_ORIGIN","SUPABASE_URL","SUPABASE_PUBLISHABLE_KEY"]){if(!find(n))throw Error("Missing "+n)}
+            require("fs").appendFileSync(process.env.GITHUB_ENV,"CLOUDFLARE_API_TOKEN="+token+"\nCLOUDFLARE_ACCOUNT_ID="+account+"\n",{mode:0o600});
+            console.log("PASS: verified live bindings; updating code/logging only");
+          }
+          main().catch(e=>{console.log("PRECHECK_ABORT",String(e.message||e));process.exitCode=1});
+          JS
+      - name: Deploy revised errors and enable Cloudflare observability
+        run: |
+          cat > wrangler.toml <<'TOML'
+          name = "svari-aplinka-photos"
+          main = "cloudflare/photo-worker.mjs"
+          compatibility_date = "2026-10-19"
+          workers_dev = true
+          keep_vars = true
+          [observability]
+          enabled = true
+          head_sampling_rate = 1
+          [[r2_buckets]]
+          binding = "R2_BUCKET"
+          bucket_name = "svari-aplinka-foto"
+          jurisdiction = "eu"
+          TOML
+          npx --yes wrangler@4 deploy --config wrangler.toml --keep-vars
+      - name: Confirm health and admin-only access, no image upload
+        run: |
+          node <<'JS'
+          (async()=>{
+            const host="https://svari-aplinka-photos.svariaplinka-lt.workers.dev";
+            for(let i=0;i<10;i++){
+              const h=await fetch(host+"/health",{cache:"no-store"});
+              const body=await h.json().catch(()=>({}));
+              if(h.status===200&&body.storage==="ready"){
+                const r=await fetch(host+"/v1/photos",{method:"POST",headers:{"x-organization-id":"ef6edcc2-1c7d-4dd1-8ef2-67c2b5a89bff"}});
+                const res=await r.json().catch(()=>({}));
+                if(r.status===401&&res.error==="AUTH_REQUIRED"){
+                  console.log("PASS: Worker EU R2 ready, auth required, no file sent");
+                  return;
+                }
+              }
+              await new Promise(resolve=>setTimeout(resolve,2000));
+            }
+            throw Error("R2 Worker v2.2.9 post-deploy check failed");
+          })().catch(e=>{console.log(String(e.message));process.exitCode=1});
+          JS
