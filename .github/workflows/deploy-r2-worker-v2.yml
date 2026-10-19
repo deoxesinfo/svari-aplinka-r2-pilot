@@ -24,7 +24,7 @@ jobs:
         with: { node-version: '22' }
       - name: Run Worker and UI tests
         run: |
-          npm ci --legacy-peer-deps --no-audit --no-fund
+          npm install --legacy-peer-deps --no-audit --no-fund
           npm test
           node --test cloudflare/photo-worker.test.mjs
       - name: Prepare account scope and enforce disabled gates
