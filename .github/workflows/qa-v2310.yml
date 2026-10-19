@@ -1,0 +1,43 @@
+# Read-only CI: never deploy to PWA, Worker or mutate Supabase.
+name: ŠA V2.3.10 final QA (READ ONLY)
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/qa-v2310.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  v2310:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: deoxesinfo/svari-aplinka-pwa
+          ref: 2cabb8b41e169bf14b1dc4910beea038014d3f7f
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with: {node-version: '22'}
+      - name: Install dependencies
+        run: npm install --legacy-peer-deps --no-audit --no-fund
+      - name: Build PWA
+        env:
+          VITE_SA_R2_PHOTOS: enabled
+        run: npm run build
+      - name: Run all PWA and adaptive image quality tests
+        run: npm test
+      - name: Run all Worker GPS, R2, photo and security tests
+        run: node --test cloudflare/photo-worker.test.mjs
+      - name: Safety check no GPS session countdown and no paid Google Places
+        run: |
+          node <<'JS'
+          const fs=require("fs");
+          const worker=fs.readFileSync("cloudflare/photo-worker.mjs","utf8");
+          const pwa=fs.readFileSync("src/lib/photos.ts","utf8");
+          if(worker.includes("GPS_TTL_MS")||worker.includes("__sa_gps_proofs__"))throw Error("GPS session time limit still exists");
+          if(!worker.includes("uploadedBy:userId"))throw Error("photo owner audit metadata missing");
+          if(!pwa.includes("choosePhotoVariant")||!pwa.includes("variant(2000"))throw Error("adaptive image quality missing");
+          if(!worker.includes('redirect:"manual"'))throw Error("Supabase network redirect regression");
+          console.log("QA_PASS: no timed GPS sessions, per-photo coordinates, high-resolution size budget, no deployment");
+          JS
