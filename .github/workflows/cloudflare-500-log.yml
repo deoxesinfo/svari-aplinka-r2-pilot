@@ -44,25 +44,25 @@ jobs:
                 datasets:["cloudflare-workers"],
                 filters:[],
                 limit:40
-              },view:"events",limit:40,dry:true
+              },view:"events",limit:80,dry:false
             };
             const r=await call("/accounts/"+id+"/workers/observability/telemetry/query","POST",payload);
             console.log("TELEMETRY_QUERY",{status:r.status,success:r.success,errors:r.errors});
             if(!r.success){process.exitCode=3;return}
-            const events=Array.isArray(r.result?.events)?r.result.events:[];
+            const events=Array.isArray(r.result?.events?.events)?r.result.events.events:[];
             console.log("RESULT_SHAPE",Array.isArray(r.result)?"array":Object.keys(r.result||{}));
             console.log("MATCHED_EVENTS",events.length);
             // Never dump raw requests, JWT, query parameters, addresses, or metadata bodies.
             for(const item of events.slice(0,30)){
-              const meta=item?.metadata||item?.$metadata||{};
+              const meta=item?.$metadata||item?.metadata||{};
               const workers=meta?.$workers||meta?.workers||{};
-              const status=workers?.event?.response?.status||meta?.statusCode||"unknown";
+              const status=meta?.statusCode||workers?.event?.response?.status||"unknown";
               const msg=String(meta?.error||meta?.errorTemplate||"");
               const errorType=/\b(TypeError|ReferenceError|RangeError|R2Error|FetchError|InternalError)\b/.exec(msg)?.[0]||"not_classified";
               const names=Object.keys(meta||{}).filter(k=>/^(?:$metadata|error|message|level|source|status|stage)$/.test(k));
-              const service=String(meta?.$metadata?.service||"");
-              if(service==="svari-aplinka-photos"||String(meta?.$workers?.event?.request?.url||"").includes("svari-aplinka-photos")){
-                console.log("WORKER_EVENT",{time:item?.timestamp||"",status,errorType,level:item?.level||meta.level||"unknown",metadataKeys:names});
+              const service=String(meta?.service||"");
+              if(service==="svari-aplinka-photos"){
+                console.log("WORKER_EVENT",{time:item?.timestamp||"",status,errorType,level:meta.level||"unknown",code: /^R2_UPLOAD_UNEXPECTED|^WORKER_EXCEPTION/.test(String(meta.message||""))?String(meta.message).slice(0,90):"",trigger: String(meta.trigger||"").slice(0,32),metadataKeys:names});
               }
             }
           }
