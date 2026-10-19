@@ -73,7 +73,11 @@ jobs:
                   const statusTag=/\\b(?:status|statusCode)[^0-9]{1,8}(400|401|403|404|409|413|415|422|429|500|502|503)\\b/.exec(msgText)?.[1]||"";
                   const codeTag=/\\b(INTERNAL_ERROR|DATABASE_CHECK_FAILED|NO_MEMBERSHIP|AUTH_INVALID|ADMIN_ONLY|NOT_CONFIGURED|CONFIG_MISMATCH|UPLOAD_[A-Z_]+_FAILED|R2_[A-Z_]+|PHOTO_LIMIT|JOB_UNAVAILABLE|INVALID_ID)\\b/.exec(msgText)?.[1]||"";
                   const typeTag=/\\b(TypeError|ReferenceError|RangeError|SyntaxError|Error)\\b/.exec(msgText)?.[1]||"";
-                  console.log("DIAGNOSTIC",{at:new Date(item.timestamp).toISOString(),diag,statusTag,codeTag,typeTag});
+                  console.log("DIAGNOSTIC",{at:new Date(item.timestamp).toISOString(),diag,statusTag,codeTag,typeTag,
+                    safeSource:Object.fromEntries(Object.entries(item?.source||{}).filter(([k,v])=>
+                       ["status","code","errorType","stage"].includes(k)&&
+                       (typeof v==="number"||(typeof v==="string"&&v.length<80&&/^[A-Za-z0-9_ -]+$/.test(v))))
+                    )});
                 }
                 const responseCode=Number(meta.statusCode||0);
                 if(meta.level==="error"||responseCode>=400)
