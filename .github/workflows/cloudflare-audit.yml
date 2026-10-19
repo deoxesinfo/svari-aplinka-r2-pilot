@@ -19,9 +19,15 @@ jobs:
           set -euo pipefail
           node <<'JS'
           async function run(){
-            const token=(process.env.CF_TOKEN||"").trim();
-            if(!token){console.log("TOKEN_MISSING: add CLOUDFLARE_API_TOKEN to repository secrets"); process.exitCode=2;return}
-            if(!/^[A-Za-z0-9_-]{25,200}$/.test(token)){console.log("TOKEN_FORMAT_INVALID: GitHub secret must contain ONLY the token value, not a curl command, Bearer prefix or quotation marks");process.exitCode=2;return}
+            const raw=(process.env.CF_TOKEN||"").trim();
+            if(!raw){console.log("TOKEN_MISSING: add CLOUDFLARE_API_TOKEN to repository secrets"); process.exitCode=2;return}
+            // Accept pasted single token OR a Cloudflare verification snippet. Never print either.
+            const plain=/^[A-Za-z0-9_-]{25,200}$/.test(raw)?raw:null;
+            const fromBearer=/Bearer\s+([A-Za-z0-9_-]{25,200})(?=["'\s]|$)/i.exec(raw)?.[1]||null;
+            const quoted=/^["']([A-Za-z0-9_-]{25,200})["']$/.exec(raw)?.[1]||null;
+            const token=plain||fromBearer||quoted;
+            if(!token){console.log("TOKEN_FORMAT_INVALID: unexpected GitHub secret format; cannot safely extract a Cloudflare token");process.exitCode=2;return}
+            console.log("TOKEN_FORMAT",plain?"raw_token":fromBearer?"bearer_header":"quoted_token");
             async function api(path){
               const r=await fetch("https://api.cloudflare.com/client/v4"+path,{
                 headers:{"Authorization":"Bearer "+token,"Accept":"application/json"}
