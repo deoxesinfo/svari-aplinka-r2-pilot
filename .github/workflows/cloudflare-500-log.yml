@@ -62,7 +62,13 @@ jobs:
               const names=Object.keys(meta||{}).filter(k=>/^(?:$metadata|error|message|level|source|status|stage)$/.test(k));
               const service=String(meta?.service||"");
               if(service==="svari-aplinka-photos"){
-                console.log("WORKER_EVENT",{time:item?.timestamp||"",status,errorType,level:meta.level||"unknown",code: /^R2_UPLOAD_UNEXPECTED|^WORKER_EXCEPTION/.test(String(meta.message||""))?String(meta.message).slice(0,90):"",trigger: String(meta.trigger||"").slice(0,32),metadataKeys:names});
+                const src=JSON.stringify(item?.source||"");
+                const stage=/\\\"stage\\\"\\s*:\\s*\\\"([A-Z_]+)\\\"/.exec(src)?.[1]||"";
+                const workerError=/R2_UPLOAD_UNEXPECTED|WORKER_EXCEPTION|R2_HEALTH_UNAVAILABLE/.exec(src)?.[0]||"";
+                const detail=String(meta.message||"");
+                const responseCode=Number(meta.statusCode||0);
+                if(meta.level==="error"||responseCode>=400)
+                   console.log("ERROR_EVENT",JSON.stringify({at:new Date(item.timestamp).toISOString(),responseCode,workerError,stage,sourceKeys:Object.keys(item?.source||{}),messageKind: detail.startsWith("R2_")?detail.slice(0,48):"other"}));
               }
             }
           }
