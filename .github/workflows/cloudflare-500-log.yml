@@ -1,0 +1,65 @@
+name: Cloudflare one-photo 500 error log (READ ONLY)
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/cloudflare-500-log.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Query past Worker telemetry without changing data
+        env:
+          CF_TOKEN_RAW: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          node <<'JS'
+          async function main(){
+            const raw=(process.env.CF_TOKEN_RAW||"").trim();
+            const token=/^[A-Za-z0-9_-]{25,200}$/.test(raw)?raw:(/Bearer\s+([A-Za-z0-9_-]{25,200})/i.exec(raw)?.[1]);
+            if(!token){console.log("TOKEN_MISSING_OR_UNSUPPORTED");process.exitCode=2;return}
+            const call=async(path,method="GET",payload)=>{
+              const r=await fetch("https://api.cloudflare.com/client/v4"+path,{
+                method,headers:{"authorization":"Bearer "+token,"content-type":"application/json"},
+                body:payload?JSON.stringify(payload):undefined
+              });
+              const obj=await r.json().catch(()=>({}));
+              return {status:r.status,success:obj.success,result:obj.result,errors:(obj.errors||[]).map(e=>({code:e.code,message:String(e.message||"").slice(0,170)}))};
+            };
+            let id=(process.env.CF_ACCOUNT_ID||"").trim();
+            if(!id){
+              const a=await call("/accounts?per_page=50");
+              const accounts=Array.isArray(a.result)?a.result:[];
+              if(!a.success||accounts.length!==1){console.log("ACCOUNT_NOT_RESOLVED");process.exitCode=2;return}
+              id=accounts[0].id;
+            }
+            if(!/^[0-9a-f]{32}$/i.test(id))throw Error("Invalid account id");
+            const payload={
+              queryId:"r2-photo-pilot-500-20261019",
+              timeframe:{from:Date.parse("2026-10-19T10:25:00Z"),to:Date.parse("2026-10-19T11:25:00Z")},
+              parameters:{
+                datasets:["cloudflare-workers"],
+                filters:[{kind:"filter",key:"$metadata.service",operation:"eq",type:"string",value:"svari-aplinka-photos"}],
+                limit:40
+              },view:"events",limit:40,dry:true
+            };
+            const r=await call("/accounts/"+id+"/workers/observability/telemetry/query","POST",payload);
+            console.log("TELEMETRY_QUERY",{status:r.status,success:r.success,errors:r.errors});
+            if(!r.success){process.exitCode=3;return}
+            const events=Array.isArray(r.result?.events)?r.result.events:[];
+            console.log("MATCHED_EVENTS",events.length);
+            // Never dump raw requests, JWT, query parameters, addresses, or metadata bodies.
+            for(const item of events.slice(0,30)){
+              const meta=item?.metadata||item?.$metadata||{};
+              const workers=meta?.$workers||meta?.workers||{};
+              const status=workers?.event?.response?.status||meta?.statusCode||"unknown";
+              const msg=String(meta?.error||meta?.errorTemplate||"");
+              const errorType=/\b(TypeError|ReferenceError|RangeError|R2Error|FetchError|InternalError)\b/.exec(msg)?.[0]||"not_classified";
+              console.log("EVENT_SUMMARY",{time:item?.timestamp||"",status,errorType});
+            }
+          }
+          main().catch(e=>{console.log("LOG_QUERY_FAILED",String(e?.message||"error").slice(0,120));process.exitCode=4});
+          JS
