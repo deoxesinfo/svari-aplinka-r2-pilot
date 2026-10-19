@@ -1,0 +1,60 @@
+name: Cloudflare R2 EU write/delete probe (scoped, no photo upload)
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/r2-eu-storage-probe.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  r2-probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Safe temporary EU R2 object test, deletes only its own object
+        env:
+          CF_TOKEN_RAW: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CF_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          node <<'JS'
+          const raw=(process.env.CF_TOKEN_RAW||"").trim();
+          const token=/^[A-Za-z0-9_-]{25,200}$/.test(raw)?raw:/Bearer\s+([A-Za-z0-9_-]{25,200})(?=["'\s]|$)/i.exec(raw)?.[1];
+          if(!token){console.log("TOKEN_NOT_CONFIGURED");process.exit(2)}
+          const HEADERS={Authorization:"Bearer "+token,"cf-r2-jurisdiction":"eu",Accept:"application/json"};
+          const URL_BASE="https://api.cloudflare.com/client/v4";
+          async function accountId(){
+            const envId=process.env.CF_ACCOUNT_ID;
+            if(envId)return envId;
+            const r=await fetch(URL_BASE+"/accounts?per_page=50",{headers:HEADERS});
+            const d=await r.json();
+            if(!d.success||d.result?.length!==1)throw Error("ACCOUNT_LOOKUP_FAILED");
+            return d.result[0].id;
+          }
+          const safe=(v)=>v.replace(/[^0-9a-z_]/gi,"").slice(0,100);
+          async function run(){
+            const account=await accountId();
+            if(!/^[a-f0-9]{32}$/i.test(account))throw Error("INVALID_ACCOUNT");
+            const key="__sa_probe__/euprobe_"+safe(process.env.GITHUB_RUN_ID||"test");
+            const path=URL_BASE+"/accounts/"+account+"/r2/buckets/svari-aplinka-foto/objects/"+encodeURIComponent(key);
+            const bytes="safe,temporary,EU-R2-test";
+            let created=false;
+            try{
+              const put=await fetch(path,{method:"PUT",headers:{...HEADERS,"content-type":"text/plain","If-None-Match":"*"},body:bytes});
+              const result=await put.text();
+              const json=(()=>{try{return JSON.parse(result)}catch{return {}}})();
+              console.log("R2_TEST_PUT",JSON.stringify({status:put.status,success:put.ok&&(json.success!==false),errors:(json.errors||[]).map(e=>e.code)}));
+              if(!put.ok||json.success===false)throw Error("R2_TEST_PUT_FAILED");
+              created=true;
+              const get=await fetch(path,{headers:HEADERS});
+              const text=await get.text();
+              console.log("R2_TEST_GET",JSON.stringify({status:get.status,contentMatches:get.ok&&text===bytes}));
+              if(!get.ok||text!==bytes)throw Error("R2_TEST_GET_FAILED");
+            }finally{
+              if(created){
+                const del=await fetch(path,{method:"DELETE",headers:HEADERS});
+                console.log("R2_TEST_DELETE",JSON.stringify({status:del.status,ok:del.ok}));
+                if(!del.ok)process.exitCode=7;
+              }
+            }
+          }
+          run().catch(()=>{console.log("R2_PROBE_FAILED - see statuses only; main Worker and pilot reservation unchanged");process.exitCode=6});
+          JS
