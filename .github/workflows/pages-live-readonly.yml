@@ -1,0 +1,37 @@
+name: Verify both GitHub Pages sites (READ ONLY)
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/pages-live-readonly.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  check-both-pages:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check main PWA and isolated pilot over HTTPS without authentication
+        shell: bash
+        run: |
+          set -euo pipefail
+          main="https://deoxesinfo.github.io/svari-aplinka-pwa/"
+          pilot="https://deoxesinfo.github.io/svari-aplinka-r2-pilot/"
+          fetch() {
+            local url="$1" file="$2" expected="$3" status=""
+            for i in 1 2 3 4 5; do
+              status=$(curl -fsSL --max-time 15 --retry 1 -o "$file" -w '%{http_code}' "$url") && break || true
+              sleep 3
+            done
+            echo "$url -> $status"
+            test "$status" = "200"
+            grep -Fq "$expected" "$file"
+          }
+          fetch "$main" "/tmp/main.html" "Švari Aplinka"
+          fetch "$pilot" "/tmp/pilot.html" "Švari Aplinka"
+          grep -Fq 'PILOT' /tmp/pilot.html
+          grep -Fq 'bandomoji nuotrauka' /tmp/pilot.html
+          if grep -Fq 'bandomoji nuotrauka' /tmp/main.html; then
+            echo "FAIL: production PWA unexpectedly appears to be the pilot"; exit 1
+          fi
+          echo "PASS: production and isolated pilot both accessible, independently titled."
